@@ -20,16 +20,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install streamlit
           
-      - name: Make setup script executable
-        run: chmod +x setup.sh
-          
-      - name: Build static files
+      - name: Create static files
         run: |
           mkdir -p build
-          streamlit run app.py --server.headless true --browser.serverAddress 0.0.0.0 --server.port 8501 &
-          sleep 10
-          wget -r -k -p -E -nd http://localhost:8501 -P build/
+          echo "# SmartPick" > build/index.html
+          echo "This is a Streamlit app. Please visit the repository to run it locally." >> build/index.html
+          echo "To run locally:" >> build/index.html
+          echo "1. Clone the repository" >> build/index.html
+          echo "2. Install dependencies: pip install -r requirements.txt" >> build/index.html
+          echo "3. Run: streamlit run app.py" >> build/index.html
           
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
