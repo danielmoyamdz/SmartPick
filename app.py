@@ -10,6 +10,7 @@ from src.models.device import Device
 import plotly.express as px
 import plotly.graph_objects as go
 import json
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -112,21 +113,43 @@ st.markdown("""
 async def search_devices(query: str, category: str) -> List[Dict[str, Any]]:
     """Search for devices using GSMArena."""
     try:
+        if not query or not query.strip():
+            st.warning("Por favor ingresa un término de búsqueda.")
+            return []
+            
+        st.info(f"Buscando dispositivos con el término: {query}")
         devices = await gsmarena_scraper.search_devices(query, category)
+        
+        if not devices:
+            st.warning("No se encontraron dispositivos que coincidan con tu búsqueda.")
+            return []
+            
         return devices
     except Exception as e:
-        st.error(f"Error searching devices: {str(e)}")
+        st.error(f"Error al buscar dispositivos: {str(e)}")
+        logger.error(f"Error searching devices: {str(e)}")
         return []
 
 def display_device_card(device: Dict[str, Any]):
-    """Display a device card with its details."""
-    st.markdown(f"""
-        <div class="device-card">
-            <h3>{device['name']}</h3>
-            <p><strong>Brand:</strong> {device['brand']}</p>
-            <p><strong>Source:</strong> <a href="{device['source_url']}" target="_blank">GSMArena</a></p>
-        </div>
-    """, unsafe_allow_html=True)
+    """Display a device card with its specifications."""
+    st.subheader(f"{device['brand']} {device['name']}")
+    
+    # Create columns for specifications
+    col1, col2 = st.columns(2)
+    
+    # Filter out specifications with value "N/A"
+    filtered_specs = {k: v for k, v in device['specifications'].items() if v != "N/A"}
+    
+    # Display specifications in columns
+    for i, (spec, value) in enumerate(filtered_specs.items()):
+        if i % 2 == 0:
+            col1.write(f"**{spec}:** {value}")
+        else:
+            col2.write(f"**{spec}:** {value}")
+    
+    # Add a link to the source
+    st.write(f"[Ver en GSMArena]({device['source_url']})")
+    st.markdown("---")
 
 def main():
     st.title("📱 SmartPick - Comparador de Dispositivos")
@@ -134,63 +157,8 @@ def main():
     SmartPick te ayuda a encontrar el dispositivo perfecto comparando especificaciones, precios y reseñas de múltiples fuentes.
     """)
     
-    # Sidebar filters
-    st.sidebar.header("🔍 Filtros de Búsqueda")
-    
     # Búsqueda
     search_query = st.text_input("Buscar dispositivo", placeholder="Ej: iPhone 14, Samsung S23...")
-    
-    # Filtros
-    st.subheader("Filtros")
-    
-    # Rango de precios
-    min_price, max_price = st.slider(
-        "Rango de precios ($)",
-        min_value=0,
-        max_value=2000,
-        value=(0, 2000),
-        step=100
-    )
-    
-    # Marcas
-    brands = st.multiselect(
-        "Marcas",
-        ["Apple", "Samsung", "Google", "OnePlus", "Xiaomi", "Huawei", "Otras"],
-        default=[]
-    )
-    
-    # Año de lanzamiento
-    current_year = datetime.now().year
-    min_year, max_year = st.slider(
-        "Año de lanzamiento",
-        min_value=2018,
-        max_value=current_year,
-        value=(2018, current_year)
-    )
-    
-    # Características específicas
-    st.subheader("Características")
-    
-    # RAM
-    ram_options = st.multiselect(
-        "RAM",
-        ["4GB", "6GB", "8GB", "12GB", "16GB"],
-        default=[]
-    )
-    
-    # Almacenamiento
-    storage_options = st.multiselect(
-        "Almacenamiento",
-        ["64GB", "128GB", "256GB", "512GB", "1TB"],
-        default=[]
-    )
-    
-    # Tamaño de pantalla
-    screen_sizes = st.multiselect(
-        "Tamaño de pantalla",
-        ["< 6 pulgadas", "6-6.5 pulgadas", "6.5-7 pulgadas", "> 7 pulgadas"],
-        default=[]
-    )
     
     # Botón de búsqueda
     search_button = st.button("🔍 Buscar Dispositivos")
@@ -199,7 +167,8 @@ def main():
     main_container = st.container()
 
     # Función para mostrar métricas
-    def show_metrics(device: Device):
+    def show_metrics(device: Dict[str, Any]):
+        """Show device metrics in a grid layout."""
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
@@ -208,7 +177,7 @@ def main():
                 <div class="metric-value">{}</div>
                 <div class="metric-label">Precio</div>
             </div>
-            """.format(f"${device.price:,.2f}" if device.price else "N/A"), unsafe_allow_html=True)
+            """.format(f"${device.get('price', 'N/A'):,.2f}" if device.get('price') else "N/A"), unsafe_allow_html=True)
         
         with col2:
             st.markdown("""
@@ -216,7 +185,7 @@ def main():
                 <div class="metric-value">{}</div>
                 <div class="metric-label">RAM</div>
             </div>
-            """.format(device.specifications.ram if device.specifications.ram else "N/A"), unsafe_allow_html=True)
+            """.format(device.get('specifications', {}).get('ram', 'N/A')), unsafe_allow_html=True)
         
         with col3:
             st.markdown("""
@@ -224,7 +193,7 @@ def main():
                 <div class="metric-value">{}</div>
                 <div class="metric-label">Almacenamiento</div>
             </div>
-            """.format(device.specifications.storage if device.specifications.storage else "N/A"), unsafe_allow_html=True)
+            """.format(device.get('specifications', {}).get('storage', 'N/A')), unsafe_allow_html=True)
         
         with col4:
             st.markdown("""
@@ -232,38 +201,39 @@ def main():
                 <div class="metric-value">{}</div>
                 <div class="metric-label">Pantalla</div>
             </div>
-            """.format(device.specifications.display if device.specifications.display else "N/A"), unsafe_allow_html=True)
+            """.format(device.get('specifications', {}).get('display', 'N/A')), unsafe_allow_html=True)
 
     # Función para mostrar especificaciones
-    def show_specifications(device: Device):
+    def show_specifications(device: Dict[str, Any]):
+        """Show device specifications in a table format."""
         st.markdown("### 📋 Especificaciones Técnicas")
         
         specs = {
             "General": {
-                "Marca": device.brand,
-                "Modelo": device.name,
-                "Fecha de lanzamiento": device.release_date.strftime("%B %Y") if device.release_date else "N/A",
-                "Precio": f"${device.price:,.2f}" if device.price else "N/A"
+                "Marca": device.get('brand', 'N/A'),
+                "Modelo": device.get('name', 'N/A'),
+                "Fecha de lanzamiento": device.get('release_date', 'N/A'),
+                "Precio": f"${device.get('price', 'N/A'):,.2f}" if device.get('price') else "N/A"
             },
             "Pantalla": {
-                "Tamaño": device.specifications.display,
-                "Resolución": device.specifications.resolution,
-                "Tipo": device.specifications.display_type
+                "Tamaño": device.get('specifications', {}).get('display', 'N/A'),
+                "Resolución": device.get('specifications', {}).get('resolution', 'N/A'),
+                "Tipo": device.get('specifications', {}).get('display_type', 'N/A')
             },
             "Hardware": {
-                "Procesador": device.specifications.cpu,
-                "RAM": device.specifications.ram,
-                "Almacenamiento": device.specifications.storage,
-                "GPU": device.specifications.gpu
+                "Procesador": device.get('specifications', {}).get('cpu', 'N/A'),
+                "RAM": device.get('specifications', {}).get('ram', 'N/A'),
+                "Almacenamiento": device.get('specifications', {}).get('storage', 'N/A'),
+                "GPU": device.get('specifications', {}).get('gpu', 'N/A')
             },
             "Cámara": {
-                "Principal": device.specifications.camera,
-                "Frontal": device.specifications.front_camera,
-                "Video": device.specifications.video
+                "Principal": device.get('specifications', {}).get('camera', 'N/A'),
+                "Frontal": device.get('specifications', {}).get('front_camera', 'N/A'),
+                "Video": device.get('specifications', {}).get('video', 'N/A')
             },
             "Batería": {
-                "Capacidad": device.specifications.battery,
-                "Carga rápida": device.specifications.charging
+                "Capacidad": device.get('specifications', {}).get('battery', 'N/A'),
+                "Carga rápida": device.get('specifications', {}).get('charging', 'N/A')
             }
         }
         
@@ -274,7 +244,8 @@ def main():
                     st.markdown(f"**{key}:** {value}")
 
     # Función para mostrar gráficos de comparación
-    def show_comparison_charts(devices: List[Device]):
+    def show_comparison_charts(devices: List[Dict[str, Any]]):
+        """Show comparison charts for selected devices."""
         if len(devices) < 2:
             return
         
@@ -283,12 +254,12 @@ def main():
         # Preparar datos para los gráficos
         data = []
         for device in devices:
-            if device.price and device.specifications.ram and device.specifications.storage:
+            if device.get('price') and device.get('specifications', {}).get('ram') and device.get('specifications', {}).get('storage'):
                 data.append({
-                    "Dispositivo": device.name,
-                    "Precio": device.price,
-                    "RAM": device.specifications.ram,
-                    "Almacenamiento": device.specifications.storage
+                    "Dispositivo": device['name'],
+                    "Precio": device['price'],
+                    "RAM": device['specifications']['ram'],
+                    "Almacenamiento": device['specifications']['storage']
                 })
         
         if not data:
@@ -303,108 +274,86 @@ def main():
         # Gráfico de especificaciones
         fig_specs = go.Figure()
         fig_specs.add_trace(go.Bar(name="RAM", x=df["Dispositivo"], y=df["RAM"]))
-        fig_specs.add_trace(go.Bar(name="Almacenamiento", x=df["Dispositivo"], y=df["Almacenamiento"]))
+        fig_specs.add_trace(go.Bar(name="Almacenamiento", x=df["Dispositivo"], y=df["Storage"]))
         fig_specs.update_layout(title="Comparación de Especificaciones", barmode="group")
         st.plotly_chart(fig_specs, use_container_width=True)
-
-    # Función para aplicar filtros
-    def apply_filters(device: Device) -> bool:
-        # Filtro de precio
-        if device.price:
-            if not (min_price <= device.price <= max_price):
-                return False
-        
-        # Filtro de marca
-        if brands and device.brand not in brands:
-            return False
-        
-        # Filtro de año
-        if device.release_date:
-            if not (min_year <= device.release_date.year <= max_year):
-                return False
-        
-        # Filtro de RAM
-        if ram_options and device.specifications.ram:
-            if device.specifications.ram not in ram_options:
-                return False
-        
-        # Filtro de almacenamiento
-        if storage_options and device.specifications.storage:
-            if device.specifications.storage not in storage_options:
-                return False
-        
-        # Filtro de tamaño de pantalla
-        if screen_sizes and device.specifications.display:
-            screen_size = device.specifications.display.split()[0]
-            try:
-                size = float(screen_size)
-                if size < 6 and "< 6 pulgadas" not in screen_sizes:
-                    return False
-                elif 6 <= size < 6.5 and "6-6.5 pulgadas" not in screen_sizes:
-                    return False
-                elif 6.5 <= size < 7 and "6.5-7 pulgadas" not in screen_sizes:
-                    return False
-                elif size >= 7 and "> 7 pulgadas" not in screen_sizes:
-                    return False
-            except ValueError:
-                pass
-        
-        return True
 
     # Procesar búsqueda
     if search_button and search_query:
         with main_container:
-            st.markdown("### 🔍 Resultados de la búsqueda")
+            st.subheader("🔍 Resultados de la búsqueda")
             
-            # Mostrar spinner durante la búsqueda
-            with st.spinner("Buscando dispositivos..."):
-                # Realizar búsqueda
-                devices = asyncio.run(gsmarena_scraper.search_devices(search_query))
+            # Realizar búsqueda
+            devices = asyncio.run(search_devices(search_query, None))
+            
+            if not devices:
+                st.warning("No se encontraron dispositivos que coincidan con tu búsqueda.")
+            else:
+                st.success(f"Se encontraron {len(devices)} dispositivos.")
                 
-                # Aplicar filtros
-                filtered_devices = [device for device in devices if apply_filters(device)]
+                # Inicializar la lista de dispositivos para comparar en la sesión
+                if 'devices_to_compare' not in st.session_state:
+                    st.session_state.devices_to_compare = []
                 
-                if not filtered_devices:
-                    st.warning("No se encontraron dispositivos que coincidan con los criterios de búsqueda.")
-                else:
-                    st.success(f"Se encontraron {len(filtered_devices)} dispositivos.")
-                    
-                    # Mostrar dispositivos
-                    for device in filtered_devices:
-                        with st.expander(f"📱 {device['name']} ({device['brand']})"):
-                            show_metrics(device)
-                            show_specifications(device)
-                            
-                            # Botones de acción
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                if st.button("➕ Añadir a comparación", key=f"compare_{device['id']}"):
-                                    if "comparison" not in st.session_state:
-                                        st.session_state.comparison = []
-                                    if device not in st.session_state.comparison:
-                                        st.session_state.comparison.append(device)
-                                        st.success("Dispositivo añadido a la comparación")
-                                    else:
-                                        st.warning("Este dispositivo ya está en la comparación")
-                            
-                            with col2:
-                                if st.button("🔗 Ver en GSMArena", key=f"link_{device['id']}"):
-                                    st.markdown(f"[Abrir en GSMArena]({device['source_url']})")
-                    
-                    # Mostrar comparación si hay dispositivos seleccionados
-                    if "comparison" in st.session_state and st.session_state.comparison:
-                        show_comparison_charts(st.session_state.comparison)
+                # Mostrar dispositivos
+                for device in devices:
+                    with st.expander(f"📱 {device['name']} ({device['brand']})"):
+                        # Mostrar métricas
+                        show_metrics(device)
                         
-                        # Botón para limpiar comparación
-                        if st.button("🗑️ Limpiar comparación"):
-                            st.session_state.comparison = []
-                            st.experimental_rerun()
+                        # Mostrar especificaciones
+                        show_specifications(device)
+                        
+                        # Mostrar enlace a GSMArena
+                        display_device_card(device)
+                        
+                        # Botón para añadir a la comparación
+                        if device not in st.session_state.devices_to_compare:
+                            if st.button(f"Añadir {device['name']} a la comparación", key=f"add_{device['name']}"):
+                                st.session_state.devices_to_compare.append(device)
+                                st.success(f"{device['name']} añadido a la comparación")
+                        else:
+                            if st.button(f"Quitar {device['name']} de la comparación", key=f"remove_{device['name']}"):
+                                st.session_state.devices_to_compare.remove(device)
+                                st.success(f"{device['name']} quitado de la comparación")
+                
+                # Mostrar sección de comparación si hay dispositivos seleccionados
+                if st.session_state.devices_to_compare:
+                    st.markdown("---")
+                    st.subheader("📊 Comparación de Dispositivos")
+                    
+                    # Mostrar gráficos de comparación
+                    show_comparison_charts(st.session_state.devices_to_compare)
+                    
+                    # Mostrar tabla de comparación
+                    st.markdown("### 📋 Tabla de Comparación")
+                    
+                    # Preparar datos para la tabla
+                    comparison_data = []
+                    for device in st.session_state.devices_to_compare:
+                        specs = device.get('specifications', {})
+                        comparison_data.append({
+                            "Dispositivo": f"{device['brand']} {device['name']}",
+                            "Precio": f"${device.get('price', 'N/A'):,.2f}" if device.get('price') else "N/A",
+                            "Pantalla": specs.get('display', 'N/A'),
+                            "Resolución": specs.get('resolution', 'N/A'),
+                            "Procesador": specs.get('cpu', 'N/A'),
+                            "RAM": specs.get('ram', 'N/A'),
+                            "Almacenamiento": specs.get('storage', 'N/A'),
+                            "Cámara Principal": specs.get('camera', 'N/A'),
+                            "Cámara Frontal": specs.get('front_camera', 'N/A'),
+                            "Batería": specs.get('battery', 'N/A'),
+                            "Carga Rápida": specs.get('charging', 'N/A')
+                        })
+                    
+                    # Mostrar tabla
+                    df = pd.DataFrame(comparison_data)
+                    st.dataframe(df, use_container_width=True)
 
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center'>
-        <p>Desarrollado con ❤️ por SmartPick Team</p>
         <p>Datos proporcionados por GSMArena</p>
     </div>
     """, unsafe_allow_html=True)
