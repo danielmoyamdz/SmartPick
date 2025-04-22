@@ -130,6 +130,28 @@ async def search_devices(query: str, category: str) -> List[Dict[str, Any]]:
         logger.error(f"Error searching devices: {str(e)}")
         return []
 
+async def search_devices_by_price(min_price: float, max_price: float) -> List[Dict[str, Any]]:
+    """Search for devices within a price range."""
+    try:
+        # Obtener todos los dispositivos populares (usando búsqueda vacía)
+        devices = await gsmarena_scraper.search_devices("", None)
+        
+        # Filtrar dispositivos por rango de precio
+        filtered_devices = []
+        for device in devices:
+            price = device.get('price')
+            if price is not None and min_price <= price <= max_price:
+                filtered_devices.append(device)
+        
+        # Ordenar por precio
+        filtered_devices.sort(key=lambda x: x.get('price', float('inf')))
+        
+        return filtered_devices
+    except Exception as e:
+        st.error(f"Error al buscar dispositivos: {str(e)}")
+        logging.error(f"Error searching devices by price: {str(e)}")
+        return []
+
 def display_device_card(device: Dict[str, Any]):
     """Display a device card with its specifications."""
     st.subheader(f"{device['brand']} {device['name']}")
@@ -157,8 +179,32 @@ def main():
     SmartPick te ayuda a encontrar el dispositivo perfecto comparando especificaciones, precios y reseñas de múltiples fuentes.
     """)
     
-    # Búsqueda
-    search_query = st.text_input("Buscar dispositivo", placeholder="Ej: iPhone 14, Samsung S23...")
+    # Sección de filtros de precio
+    st.markdown("### 💰 Rango de Presupuesto")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        min_price = st.number_input(
+            "Precio mínimo (€)",
+            min_value=0,
+            max_value=2000,
+            value=0,
+            step=50
+        )
+    
+    with col2:
+        max_price = st.number_input(
+            "Precio máximo (€)",
+            min_value=0,
+            max_value=2000,
+            value=1000,
+            step=50
+        )
+    
+    # Validación del rango de precios
+    if min_price > max_price:
+        st.error("El precio mínimo no puede ser mayor que el precio máximo")
+        return
     
     # Botón de búsqueda
     search_button = st.button("🔍 Buscar Dispositivos")
@@ -278,44 +324,21 @@ def main():
         fig_specs.update_layout(title="Comparación de Especificaciones", barmode="group")
         st.plotly_chart(fig_specs, use_container_width=True)
 
-    # Procesar búsqueda
-    if search_button and search_query:
+    if search_button:
         with main_container:
-            st.subheader("🔍 Resultados de la búsqueda")
-            
-            # Realizar búsqueda
-            devices = asyncio.run(search_devices(search_query, None))
+            st.info(f"Buscando dispositivos entre {min_price}€ y {max_price}€")
+            # Realizar búsqueda asíncrona
+            devices = asyncio.run(search_devices_by_price(min_price, max_price))
             
             if not devices:
-                st.warning("No se encontraron dispositivos que coincidan con tu búsqueda.")
+                st.warning("No se encontraron dispositivos en ese rango de precios.")
             else:
-                st.success(f"Se encontraron {len(devices)} dispositivos.")
-                
-                # Inicializar la lista de dispositivos para comparar en la sesión
-                if 'devices_to_compare' not in st.session_state:
-                    st.session_state.devices_to_compare = []
-                
-                # Mostrar dispositivos
+                st.success(f"Se encontraron {len(devices)} dispositivos")
                 for device in devices:
-                    with st.expander(f"📱 {device['name']} ({device['brand']})"):
-                        # Mostrar métricas
+                    with st.expander(f"{device['brand']} {device['name']} - {device.get('price', 'N/A')}€"):
                         show_metrics(device)
-                        
-                        # Mostrar especificaciones
                         show_specifications(device)
-                        
-                        # Mostrar enlace a GSMArena
                         display_device_card(device)
-                        
-                        # Botón para añadir a la comparación
-                        if device not in st.session_state.devices_to_compare:
-                            if st.button(f"Añadir {device['name']} a la comparación", key=f"add_{device['name']}"):
-                                st.session_state.devices_to_compare.append(device)
-                                st.success(f"{device['name']} añadido a la comparación")
-                        else:
-                            if st.button(f"Quitar {device['name']} de la comparación", key=f"remove_{device['name']}"):
-                                st.session_state.devices_to_compare.remove(device)
-                                st.success(f"{device['name']} quitado de la comparación")
                 
                 # Mostrar sección de comparación si hay dispositivos seleccionados
                 if st.session_state.devices_to_compare:

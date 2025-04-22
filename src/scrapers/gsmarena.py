@@ -1,143 +1,228 @@
 from typing import List, Dict, Any, Optional
-from datetime import datetime
-import httpx
+from datetime import datetime, timedelta
+import os
+import json
 from bs4 import BeautifulSoup
 from loguru import logger
-import re
 import asyncio
-from ..models.device import Device, PhoneSpecifications
-import random
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 import time
+import random
 
 class GSMArenaScraper:
     """Scraper for GSMArena website."""
     
     BASE_URL = "https://www.gsmarena.com"
     SEARCH_URL = f"{BASE_URL}/results.php3"
+    CACHE_DIR = "cache"
+    CACHE_DURATION = timedelta(hours=24)  # Cache duration of 24 hours
     
     def __init__(self):
-        self.client = httpx.AsyncClient(
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0",
-                "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"macOS"',
-                "Referer": "https://www.gsmarena.com/"
-            },
-            follow_redirects=True,
-            timeout=30.0
+        # Set up Chrome options
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")  # Run in headless mode
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        
+        # Initialize the Chrome driver
+        self.driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
         )
-        self.last_request_time = 0
-        self.min_request_interval = 5  # Mínimo tiempo entre solicitudes en segundos
+        
+        # Set up wait
+        self.wait = WebDriverWait(self.driver, 10)
+        
+        # Create cache directory if it doesn't exist
+        if not os.path.exists(self.CACHE_DIR):
+            os.makedirs(self.CACHE_DIR)
     
-    async def _make_request(self, url: str, params: Dict[str, str] = None) -> httpx.Response:
-        """Make a request with a delay to avoid being blocked."""
+    def _get_cache_path(self, key: str) -> str:
+        """Get the cache file path for a given key."""
+        filename = str(hash(key)) + ".json"
+        return os.path.join(self.CACHE_DIR, filename)
+    
+    async def _get_cached_data(self, key: str) -> Optional[Dict[str, Any]]:
+        """Get data from cache if it exists and is not expired."""
         try:
-            # Calcular el tiempo desde la última solicitud
-            current_time = time.time()
-            time_since_last_request = current_time - self.last_request_time
+            cache_path = self._get_cache_path(key)
+            if not os.path.exists(cache_path):
+                return None
             
-            # Si no ha pasado suficiente tiempo, esperar
-            if time_since_last_request < self.min_request_interval:
-                wait_time = self.min_request_interval - time_since_last_request
-                logger.info(f"Esperando {wait_time:.2f} segundos antes de hacer la siguiente solicitud")
-                await asyncio.sleep(wait_time)
+            with open(cache_path, 'r') as f:
+                cached_data = json.load(f)
             
-            # Añadir un pequeño delay aleatorio adicional (1-3 segundos)
-            additional_delay = 1 + random.random() * 2
-            await asyncio.sleep(additional_delay)
+            # Check if cache is expired
+            cached_time = datetime.fromisoformat(cached_data['timestamp'])
+            if datetime.now() - cached_time > self.CACHE_DURATION:
+                return None
             
-            # Actualizar el tiempo de la última solicitud
-            self.last_request_time = time.time()
+            return cached_data['data']
             
-            # Añadir common query parameters
-            if params is None:
-                params = {}
-            
-            # Intentar la solicitud con reintentos
-            max_retries = 3
-            retry_count = 0
-            last_error = None
-            
-            while retry_count < max_retries:
-                try:
-                    response = await self.client.get(
-                        url,
-                        params=params,
-                        headers={
-                            **self.client.headers,
-                            "Referer": self.BASE_URL
-                        }
-                    )
-                    response.raise_for_status()
-                    
-                    # Log response details for debugging
-                    logger.debug(f"Request URL: {response.url}")
-                    logger.debug(f"Response status: {response.status_code}")
-                    logger.debug(f"Response headers: {dict(response.headers)}")
-                    
-                    return response
-                    
-                except httpx.HTTPStatusError as e:
-                    last_error = e
-                    if e.response.status_code == 429:  # Too Many Requests
-                        retry_count += 1
-                        if retry_count < max_retries:
-                            # Esperar más tiempo entre reintentos
-                            wait_time = self.min_request_interval * (2 ** retry_count)
-                            logger.warning(f"Recibido error 429. Reintentando en {wait_time} segundos...")
-                            await asyncio.sleep(wait_time)
-                        else:
-                            logger.error("Se alcanzó el número máximo de reintentos")
-                            raise
-                    else:
-                        raise
-                        
         except Exception as e:
-            logger.error(f"Error making request to {url}: {str(e)}")
-            raise
+            logger.error(f"Error reading from cache: {str(e)}")
+            return None
+    
+    async def _save_to_cache(self, key: str, data: Dict[str, Any]):
+        """Save data to cache."""
+        try:
+            cache_path = self._get_cache_path(key)
+            cache_data = {
+                'timestamp': datetime.now().isoformat(),
+                'data': data
+            }
+            
+            with open(cache_path, 'w') as f:
+                json.dump(cache_data, f)
+                
+        except Exception as e:
+            logger.error(f"Error saving to cache: {str(e)}")
+    
+    async def get_device_details(self, url: str) -> Dict[str, Any]:
+        """Get detailed specifications for a device."""
+        try:
+            # Check cache first
+            cached_data = await self._get_cached_data(url)
+            if cached_data:
+                logger.info(f"Using cached data for {url}")
+                return cached_data
+            
+            # Fix URL formation
+            if not url.startswith('http'):
+                url = f"{self.BASE_URL}/{url}"
+            if url.endswith('.php.php'):
+                url = url[:-4]
+            
+            logger.info(f"Fetching device details from {url}")
+            
+            # Load the page
+            self.driver.get(url)
+            
+            # Wait for the main content to load
+            self.wait.until(EC.presence_of_element_located((By.CLASS_NAME, "specs-phone-name-title")))
+            
+            # Get the page source
+            html = self.driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Extract basic device info
+            device_info = {
+                'name': soup.find('h1', class_='specs-phone-name-title').get_text(strip=True) if soup.find('h1', class_='specs-phone-name-title') else "Unknown",
+                'brand': url.split('/')[-1].split('_')[0].capitalize(),
+                'url': url
+            }
+            
+            # Extract specifications
+            specs = {}
+            tables = soup.find_all(['table', 'div'], class_=['specs-list', 'specs-list2', 'specs-list3'])
+            
+            for table in tables:
+                rows = table.find_all(['tr', 'div'], class_=['nfo', 'specs-list-row'])
+                for row in rows:
+                    cells = row.find_all(['td', 'div'], class_=['nfo', 'specs-list-cell'])
+                    if len(cells) >= 2:
+                        key = cells[0].get_text(strip=True)
+                        value = cells[1].get_text(strip=True)
+                        specs[key] = value
+            
+            # Extract key specifications
+            key_specs = {
+                'display': await self._extract_spec(specs, 'Display'),
+                'processor': await self._extract_spec(specs, 'Chipset'),
+                'ram': await self._extract_spec(specs, 'RAM'),
+                'storage': await self._extract_spec(specs, 'Storage'),
+                'camera': await self._extract_spec(specs, 'Main camera'),
+                'battery': await self._extract_spec(specs, 'Battery'),
+                'price': await self._extract_spec(specs, 'Price')
+            }
+            
+            device_info.update(key_specs)
+            
+            # Save to cache
+            await self._save_to_cache(url, device_info)
+            
+            logger.info(f"Successfully extracted details for {device_info['name']}")
+            return device_info
+            
+        except Exception as e:
+            logger.error(f"Error getting device details: {str(e)}")
+            return {}
+    
+    async def _extract_spec(self, specs: Dict[str, str], spec_name: str) -> str:
+        """Extract a specific specification from the specs dictionary with improved matching."""
+        try:
+            # Lista de posibles nombres para cada especificación
+            spec_aliases = {
+                'Display': ['Display', 'Screen', 'Display size', 'Size'],
+                'Chipset': ['Chipset', 'CPU', 'Processor', 'SoC'],
+                'RAM': ['RAM', 'Memory'],
+                'Storage': ['Storage', 'Built-in Storage', 'Internal'],
+                'Main camera': ['Main Camera', 'Camera', 'Rear Camera', 'Primary Camera'],
+                'Battery': ['Battery', 'Battery capacity', 'Battery size'],
+                'Price': ['Price', 'Retail Price', 'Launch Price']
+            }
+            
+            # Intentar coincidencia exacta primero
+            if spec_name in specs:
+                return specs[spec_name]
+            
+            # Intentar con los alias
+            if spec_name in spec_aliases:
+                for alias in spec_aliases[spec_name]:
+                    # Coincidencia exacta
+                    if alias in specs:
+                        return specs[alias]
+                    
+                    # Coincidencia insensible a mayúsculas/minúsculas
+                    for key in specs:
+                        if key.lower() == alias.lower():
+                            return specs[key]
+                    
+                    # Coincidencia parcial
+                    for key in specs:
+                        if alias.lower() in key.lower():
+                            return specs[key]
+            
+            logger.warning(f"Could not find specification '{spec_name}' using any method")
+            return "N/A"
+            
+        except Exception as e:
+            logger.error(f"Error extracting specification '{spec_name}': {str(e)}")
+            return "N/A"
     
     async def search_devices(self, query: str, category: str = None) -> List[Dict[str, Any]]:
         """Search for devices on GSMArena."""
-        logger.info(f"Searching for devices with query: {query}")
-        
-        if not query or not query.strip():
-            logger.warning("Empty search query provided")
-            return []
-            
-        # Clean the query
-        query = query.strip()
-        
         try:
-            # Use the search results page directly
-            search_params = {
-                "sQuickSearch": "yes",
-                "sName": query
-            }
+            # Si no hay query, buscar dispositivos populares
+            if not query or not query.strip():
+                return await self._get_popular_devices()
             
-            logger.info(f"Searching with params: {search_params}")
-            response = await self._make_request(self.SEARCH_URL, search_params)
+            # Clean the query
+            query = query.strip()
             
-            if response.status_code != 200:
-                logger.error(f"Search page returned status code: {response.status_code}")
-                return []
-                
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Build the search URL
+            search_url = f"{self.SEARCH_URL}?sQuickSearch=yes&sName={query}"
             
-            # Log the full HTML for debugging
-            logger.debug(f"Full response HTML: {soup.prettify()}")
+            logger.info(f"Searching devices with query: {query}")
             
-            # Find the main results container
+            # Load the search page
+            self.driver.get(search_url)
+            
+            # Wait for results to load
+            self.wait.until(EC.presence_of_element_located((By.CLASS_NAME, "makers")))
+            
+            # Get the page source
+            html = self.driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
             results = []
             
             # Try to find the makers list
@@ -145,354 +230,136 @@ class GSMArenaScraper:
             if makers_div:
                 # Find all phone entries
                 phones = makers_div.find_all(['li', 'div'], class_='makers')
+                logger.info(f"Found {len(phones)} devices in search results")
                 
-                for phone in phones:
+                # Crear una lista de tareas para obtener detalles en paralelo
+                tasks = []
+                for phone in phones[:5]:  # Limitar a 5 dispositivos para mayor velocidad
                     try:
-                        # Find the link
                         link = phone.find('a')
-                        if not link:
+                        if not link or not link.get('href'):
                             continue
                             
-                        href = link.get('href')
-                        if not href:
-                            continue
-                            
-                        # Get the device name
                         name = link.get_text(strip=True)
                         if not name:
                             continue
                             
-                        # Get the brand (usually the first word in the name)
-                        brand = name.split()[0]
+                        url = link['href']
+                        if not url.startswith('http'):
+                            url = f"{self.BASE_URL}/{url}"
                         
-                        # Get the full URL
-                        url = f"{self.BASE_URL}/{href}" if not href.startswith('http') else href
+                        # Añadir tarea para obtener detalles
+                        tasks.append(self.get_device_details(url))
                         
-                        logger.info(f"Found device: {name} ({brand})")
-                        
-                        # Get device details
-                        details = await self._get_device_details(url)
-                        if details:
-                            results.append({
-                                "name": name,
-                                "brand": brand,
-                                "source_url": url,
-                                "specifications": details
-                            })
-                            logger.info(f"Added device details for: {name}")
-                            
-                            # Si encontramos resultados en el primer contenedor, retornamos inmediatamente
-                            if len(results) >= 5:  # Limitamos a 5 resultados para evitar demasiadas solicitudes
-                                logger.info(f"Found {len(results)} devices in makers list")
-                                return results
-                                
                     except Exception as e:
                         logger.error(f"Error processing phone entry: {str(e)}")
                         continue
+                
+                # Ejecutar todas las tareas en paralelo con un límite de concurrencia
+                if tasks:
+                    # Usar un semáforo para limitar la concurrencia
+                    semaphore = asyncio.Semaphore(2)  # Máximo 2 solicitudes simultáneas
+                    
+                    async def get_details_with_semaphore(task):
+                        async with semaphore:
+                            return await task
+                    
+                    details_tasks = [get_details_with_semaphore(task) for task in tasks]
+                    details_list = await asyncio.gather(*details_tasks, return_exceptions=True)
+                    
+                    for details in details_list:
+                        if isinstance(details, Exception):
+                            logger.error(f"Error getting device details: {str(details)}")
+                            continue
+                            
+                        if details:
+                            results.append(details)
+            else:
+                logger.warning("No search results found")
             
-            logger.info(f"Total devices found: {len(results)}")
             return results
             
         except Exception as e:
             logger.error(f"Error during search: {str(e)}")
             return []
     
-    async def _get_device_details(self, url: str) -> Dict[str, Any]:
-        """Get detailed specifications for a device."""
+    async def _get_popular_devices(self) -> List[Dict[str, Any]]:
+        """Get popular devices from GSMArena homepage."""
         try:
-            logger.info(f"Getting device details from: {url}")
-            response = await self._make_request(url)
+            logger.info("Getting popular devices from homepage")
             
-            soup = BeautifulSoup(response.text, 'html.parser')
-            specs = {}
+            # Load the homepage
+            self.driver.get(self.BASE_URL)
             
-            # Try different selectors for the specs table
-            table_selectors = [
-                "table.specs",
-                "table#specs-list",
-                "div.specs table",
-                "table.specs-list",
-                "div.specs-list table",
-                "div.specs-list",
-                "div#specs-list table",
-                "div#specs-list"
-            ]
+            # Wait for the popular phones section to load
+            self.wait.until(EC.presence_of_element_located((By.CLASS_NAME, "module-phones")))
             
-            logger.info("Searching for specifications table...")
-            for selector in table_selectors:
-                logger.info(f"Trying table selector: {selector}")
-                tables = soup.select(selector)
-                logger.info(f"Found {len(tables)} tables with selector {selector}")
+            # Get the page source
+            html = self.driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
+            results = []
+            
+            # Buscar en la sección de teléfonos populares
+            popular_section = soup.find('div', class_='module-phones')
+            if popular_section:
+                phones = popular_section.find_all('a')
+                logger.info(f"Found {len(phones)} popular devices")
                 
-                for table in tables:
-                    # Try to find all rows, including those in nested tables
-                    rows = table.select("tr")
-                    logger.info(f"Found {len(rows)} rows in table")
-                    
-                    for row in rows:
-                        # Get category
-                        category_cell = row.select_one("th")
-                        if not category_cell:
+                # Crear una lista de tareas para obtener detalles
+                tasks = []
+                for phone in phones[:10]:  # Limitar a 10 dispositivos
+                    try:
+                        href = phone.get('href')
+                        if not href:
                             continue
                             
-                        category = category_cell.text.strip()
-                        if category not in specs:
-                            specs[category] = {}
-                        
-                        # Get specifications in this category
-                        for cell in row.select("td"):
-                            # Try different selectors for label and value
-                            label = (
-                                cell.select_one("span.specs-label") or
-                                cell.select_one("td.ttl") or
-                                cell.select_one("td:first-child") or
-                                cell.select_one("td.nfo")
-                            )
-                            value = (
-                                cell.select_one("span.specs-value") or
-                                cell.select_one("td.nfo") or
-                                cell.select_one("td:last-child") or
-                                cell.select_one("td.ttl")
-                            )
+                        name = phone.get_text(strip=True)
+                        if not name:
+                            continue
                             
-                            if label and value:
-                                label_text = label.text.strip()
-                                value_text = value.text.strip()
-                                if label_text and value_text:
-                                    specs[category][label_text] = value_text
-                                    logger.debug(f"Found spec: {category} - {label_text}: {value_text}")
-            
-            # Extract key specifications with fallbacks
-            result = {
-                "display": (
-                    self._extract_spec(specs, "Display", "Size") or
-                    self._extract_spec(specs, "Display", "Screen size") or
-                    self._extract_spec(specs, "Display", "Physical size") or
-                    "N/A"
-                ),
-                "resolution": (
-                    self._extract_spec(specs, "Display", "Resolution") or
-                    self._extract_spec(specs, "Display", "Screen resolution") or
-                    self._extract_spec(specs, "Display", "Pixel density") or
-                    "N/A"
-                ),
-                "display_type": (
-                    self._extract_spec(specs, "Display", "Type") or
-                    self._extract_spec(specs, "Display", "Display type") or
-                    self._extract_spec(specs, "Display", "Technology") or
-                    "N/A"
-                ),
-                "cpu": (
-                    self._extract_spec(specs, "Hardware", "CPU") or
-                    self._extract_spec(specs, "Hardware", "Processor") or
-                    self._extract_spec(specs, "Hardware", "Chipset") or
-                    "N/A"
-                ),
-                "ram": (
-                    self._extract_spec(specs, "Hardware", "RAM") or
-                    self._extract_spec(specs, "Memory", "RAM") or
-                    self._extract_spec(specs, "Hardware", "Memory") or
-                    "N/A"
-                ),
-                "storage": (
-                    self._extract_spec(specs, "Hardware", "Storage") or
-                    self._extract_spec(specs, "Memory", "Storage") or
-                    self._extract_spec(specs, "Hardware", "Card slot") or
-                    "N/A"
-                ),
-                "gpu": (
-                    self._extract_spec(specs, "Hardware", "GPU") or
-                    self._extract_spec(specs, "Hardware", "Graphics") or
-                    self._extract_spec(specs, "Hardware", "Graphics processor") or
-                    "N/A"
-                ),
-                "camera": (
-                    self._extract_spec(specs, "Camera", "Main camera") or
-                    self._extract_spec(specs, "Camera", "Primary camera") or
-                    self._extract_spec(specs, "Camera", "Camera") or
-                    "N/A"
-                ),
-                "front_camera": (
-                    self._extract_spec(specs, "Camera", "Selfie camera") or
-                    self._extract_spec(specs, "Camera", "Front camera") or
-                    self._extract_spec(specs, "Camera", "Selfie") or
-                    "N/A"
-                ),
-                "video": (
-                    self._extract_spec(specs, "Camera", "Video") or
-                    self._extract_spec(specs, "Camera", "Video recording") or
-                    self._extract_spec(specs, "Camera", "Video capture") or
-                    "N/A"
-                ),
-                "battery": (
-                    self._extract_spec(specs, "Battery", "Capacity") or
-                    self._extract_spec(specs, "Battery", "Battery capacity") or
-                    self._extract_spec(specs, "Battery", "Battery") or
-                    "N/A"
-                ),
-                "charging": (
-                    self._extract_spec(specs, "Battery", "Charging") or
-                    self._extract_spec(specs, "Battery", "Fast charging") or
-                    self._extract_spec(specs, "Battery", "Charger") or
-                    "N/A"
-                )
-            }
-            
-            logger.info(f"Successfully extracted specifications: {result}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error getting device details: {str(e)}")
-            return {}
-    
-    def _extract_spec(self, specs: Dict[str, Dict[str, str]], category: str, field: str) -> str:
-        """Extract a specific specification from the specs dictionary."""
-        try:
-            logger.debug(f"Extracting spec: {category}/{field}")
-            if category in specs:
-                # Try exact match first
-                if field in specs[category]:
-                    value = specs[category][field]
-                    logger.debug(f"Found exact match for {category}/{field}: {value}")
-                    return value
-                
-                # Try case-insensitive match
-                for key, value in specs[category].items():
-                    if key.lower() == field.lower():
-                        logger.debug(f"Found case-insensitive match for {category}/{field}: {value}")
-                        return value
-                
-                # Try partial match
-                for key, value in specs[category].items():
-                    if field.lower() in key.lower():
-                        logger.debug(f"Found partial match for {category}/{field}: {value}")
-                        return value
-            
-            logger.debug(f"No match found for {category}/{field}")
-            return None
-        except Exception as e:
-            logger.error(f"Error extracting spec {category}/{field}: {str(e)}")
-            return None
-    
-    async def get_device_details(self, device_id: str) -> Dict[str, Any]:
-        """Get detailed information about a specific device."""
-        try:
-            url = f"{self.BASE_URL}/{device_id}.php"
-            logger.info(f"Fetching device details from: {url}")
-            
-            async with httpx.AsyncClient(
-                headers=self.client.headers,
-                follow_redirects=True,
-                timeout=30.0
-            ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                
-                soup = BeautifulSoup(response.text, "html.parser")
-                specs = self._parse_specifications(soup)
-                
-                # Obtener el nombre del dispositivo
-                name_elem = soup.select_one("h1.specs-phone-name-title")
-                name = name_elem.text.strip() if name_elem else "Unknown Device"
-                
-                # Obtener la marca del nombre
-                brand = name.split()[0] if len(name.split()) > 1 else "Unknown"
-                
-                # Obtener la imagen del dispositivo
-                img = soup.select_one("div.specs-photo-main img")
-                image_url = img["src"] if img and "src" in img.attrs else None
-                
-                # Obtener la fecha de lanzamiento
-                release_date = self._extract_release_date(specs)
-                
-                # Obtener el precio si está disponible
-                price = None
-                price_elem = soup.select_one(".price")
-                if price_elem:
-                    price_text = price_elem.text.strip()
-                    try:
-                        # Extraer el precio numérico
-                        price_match = re.search(r'[\d,.]+', price_text)
-                        if price_match:
-                            price = float(price_match.group().replace(',', ''))
-                    except ValueError:
-                        pass
-                
-                logger.info(f"Found device details: {name} ({brand})")
-                
-                return {
-                    "id": device_id,
-                    "name": name,
-                    "brand": brand,
-                    "image_url": image_url,
-                    "specifications": specs,
-                    "release_date": release_date.isoformat() if release_date else None,
-                    "price": price,
-                    "source": "gsmarena",
-                    "source_url": url
-                }
-        except Exception as e:
-            logger.error(f"Failed to get GSMArena device details: {str(e)}")
-            return {}
-    
-    def _parse_specifications(self, soup: BeautifulSoup) -> Dict[str, Any]:
-        """Parse device specifications from GSMArena page."""
-        specs = {}
-        
-        # Extraer especificaciones de la tabla de specs
-        for section in soup.select("#specs-list table"):
-            try:
-                category = section.find_previous("tr", class_="head")
-                if not category:
-                    continue
-                    
-                category_name = category.text.strip().lower()
-                category_specs = {}
-                
-                for row in section.select("tr:not(.head)"):
-                    try:
-                        name = row.select_one("td.ttl")
-                        value = row.select_one("td.nfo")
+                        url = href
+                        if not url.startswith('http'):
+                            url = f"{self.BASE_URL}/{url}"
                         
-                        if name and value:
-                            name = name.text.strip().lower()
-                            value = value.text.strip()
-                            category_specs[name] = value
+                        tasks.append(self.get_device_details(url))
+                        
                     except Exception as e:
-                        logger.error(f"Error parsing specification row: {str(e)}")
+                        logger.error(f"Error processing popular phone: {str(e)}")
                         continue
                 
-                if category_specs:
-                    specs[category_name] = category_specs
-            except Exception as e:
-                logger.error(f"Error parsing specification section: {str(e)}")
-                continue
-        
-        return specs
-    
-    def _extract_release_date(self, specs: Dict[str, Any]) -> Optional[datetime]:
-        """Extract release date from specifications."""
-        try:
-            if "launch" in specs:
-                date_str = specs["launch"].get("announced", "")
-                if date_str:
-                    # Try different date formats
-                    formats = ["%Y, %B %d", "%Y, %B", "%B %Y", "%Y"]
-                    for fmt in formats:
-                        try:
-                            return datetime.strptime(date_str, fmt)
-                        except ValueError:
+                # Ejecutar tareas con límite de concurrencia
+                if tasks:
+                    # Usar un semáforo para limitar la concurrencia
+                    semaphore = asyncio.Semaphore(2)  # Máximo 2 solicitudes simultáneas
+                    
+                    async def get_details_with_semaphore(task):
+                        async with semaphore:
+                            return await task
+                    
+                    details_tasks = [get_details_with_semaphore(task) for task in tasks]
+                    details_list = await asyncio.gather(*details_tasks, return_exceptions=True)
+                    
+                    for details in details_list:
+                        if isinstance(details, Exception):
+                            logger.error(f"Error getting device details: {str(details)}")
                             continue
+                            
+                        if details:
+                            results.append(details)
+                else:
+                    logger.warning("No popular devices found to process")
+            else:
+                logger.warning("Popular devices section not found")
+            
+            return results
+            
         except Exception as e:
-            logger.error(f"Error extracting release date: {str(e)}")
-        return None
+            logger.error(f"Error getting popular devices: {str(e)}")
+            return []
     
-    async def close(self):
-        """Close the HTTP client."""
-        await self.client.aclose()
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        asyncio.run(self.close()) 
+    def __del__(self):
+        """Clean up resources."""
+        try:
+            self.driver.quit()
+        except:
+            pass 
